@@ -1,0 +1,215 @@
+name: Check & Update Translations Bindings
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      cleanup_only:
+        description: "Run cleanup of old workflow runs only"
+        required: false
+        type: boolean
+        default: false
+      days_ago:
+        description: "Delete workflow runs older than (days)"
+        required: false
+        type: number
+        default: 30
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-bindings:
+    if: ${{ !inputs.cleanup_only }}
+    runs-on: ubuntu-latest
+    env:
+      GO_PLUGIFY_REPO: untrustedmodders/go-plugify
+      PLUGIN_REPO: untrustedmodders/plugify-plugin-translations
+      PLUGIN_NAME: plugify-plugin-translations
+      PLUGIN_SHORT_NAME: translations
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Get latest remote versions
+        id: remote_versions
+        run: |
+          PLUGIN_TAG=$(gh release list --repo ${{ env.PLUGIN_REPO }} --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName')
+          GOPLUGIFY_TAG=$(gh release list --repo ${{ env.GO_PLUGIFY_REPO }} --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName')
+          
+          gh release view "$PLUGIN_TAG" --repo ${{ env.PLUGIN_REPO }} --json body --jq '.body' > /tmp/plugin_notes.txt
+          gh release view "$GOPLUGIFY_TAG" --repo ${{ env.GO_PLUGIFY_REPO }} --json body --jq '.body' > /tmp/goplugify_notes.txt
+          
+          echo "plugin=$PLUGIN_TAG" >> $GITHUB_OUTPUT
+          echo "goplugify=$GOPLUGIFY_TAG" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check current versions and determine project version
+        id: version_check
+        run: |
+          if [ ! -f .github/versions.json ]; then
+            echo '{"project": "v0.0.0", "plugin": "v0.0.0", "go-plugify": "v0.0.0"}' > .github/versions.json
+          fi
+
+          CUR_PROJ=$(jq -r '.project' .github/versions.json)
+          CUR_PLUGIN=$(jq -r '.plugin' .github/versions.json)
+          CUR_GOPLUGIFY=$(jq -r '."go-plugify"' .github/versions.json)
+
+          REM_PLUGIN="${{ steps.remote_versions.outputs.plugin }}"
+          REM_GOPLUGIFY="${{ steps.remote_versions.outputs.goplugify }}"
+
+          echo "Current: Project=$CUR_PROJ, Plugin=$CUR_PLUGIN, go-plugify=$CUR_GOPLUGIFY"
+          echo "Remote: Plugin=$REM_PLUGIN, go-plugify=$REM_GOPLUGIFY"
+
+          PLUGIN_CHANGED="false"
+          if [ "$CUR_PLUGIN" != "$REM_PLUGIN" ]; then
+            PLUGIN_CHANGED="true"
+          fi
+
+          GOPLUGIFY_CHANGED="false"
+          if [ "$CUR_GOPLUGIFY" != "$REM_GOPLUGIFY" ]; then
+            GOPLUGIFY_CHANGED="true"
+          fi
+
+          echo "plugin_changed=$PLUGIN_CHANGED" >> $GITHUB_OUTPUT
+          echo "goplugify_changed=$GOPLUGIFY_CHANGED" >> $GITHUB_OUTPUT
+
+          if [ "$PLUGIN_CHANGED" == "true" ] || [ "$GOPLUGIFY_CHANGED" == "true" ]; then
+            echo "New version(s) detected!"
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+          
+            NEW_PROJ=$(echo $CUR_PROJ | awk -F. -v OFS=. '{$NF++;print}')
+            echo "new_project_version=$NEW_PROJ" >> $GITHUB_OUTPUT
+          else
+            echo "Versions match. Nothing to do."
+            echo "update_needed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download Manifest
+        if: steps.version_check.outputs.update_needed == 'true'
+        run: |
+          curl -L -o ${{ env.PLUGIN_NAME }}.pplugin.in https://github.com/${{ env.PLUGIN_REPO }}/raw/main/${{ env.PLUGIN_NAME }}.pplugin.in
+          # The manifest is a JSON file, let's use jq to be safe
+          jq --arg name "${{ env.PLUGIN_SHORT_NAME }}" '.name = $name' ${{ env.PLUGIN_NAME }}.pplugin.in > tmp.json && mv tmp.json ${{ env.PLUGIN_NAME }}.pplugin.in
+
+      - name: Build Plugify Generator
+        if: steps.version_check.outputs.update_needed == 'true'
+        run: |
+          git clone https://github.com/untrustedmodders/plugify-gen.git plugify-gen-repo
+          cd plugify-gen-repo
+          go build -o ../plugify-gen ./cmd/plugify-gen
+          cd ..
+
+          if [ -f ./plugify-gen ]; then
+            ls -la ./plugify-gen
+            file ./plugify-gen || true
+          else
+            echo "plugify-gen binary not found"
+          fi
+          
+          rm -rf plugify-gen-repo
+
+      - name: Generate Bindings
+        if: steps.version_check.outputs.update_needed == 'true'
+        run: |
+          ./plugify-gen -manifest ${{ env.PLUGIN_NAME }}.pplugin.in -output ./ -lang golang -classes -scopes=false 
+          find . -maxdepth 1 -type f \( -name "*.go" -o -name "*.c" -o -name "*.h" \) -delete
+          mv ./${{ env.PLUGIN_SHORT_NAME }}/* ./
+          rm -rf plugify-gen ${{ env.PLUGIN_NAME }}.pplugin.in ${{ env.PLUGIN_SHORT_NAME }}
+
+      - name: Ensure Go Modules
+        if: steps.version_check.outputs.update_needed == 'true'
+        run: |
+          ls -la
+          
+          if [ ! -f go.mod ]; then
+            echo "go.mod not found, initializing..."
+            go mod init github.com/${{ github.repository }}
+          fi
+          
+          go get -u ./...
+          go mod tidy
+
+      - name: Update versions file
+        if: steps.version_check.outputs.update_needed == 'true'
+        run: |
+          jq --arg p "${{ steps.version_check.outputs.new_project_version }}" \
+             --arg s "${{ steps.remote_versions.outputs.plugin }}" \
+             --arg g "${{ steps.remote_versions.outputs.goplugify }}" \
+             '.project = $p | .plugin = $s | ."go-plugify" = $g' \
+             .github/versions.json > tmp.json && mv tmp.json .github/versions.json
+
+
+      - name: Commit and Push changes
+        if: steps.version_check.outputs.update_needed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          if [ "${{ steps.version_check.outputs.update_needed }}" == "true" ]; then
+            git commit -m "feat: release ${{ steps.version_check.outputs.new_project_version }} (plugin: ${{ steps.remote_versions.outputs.plugin }}, go-plugify: ${{ steps.remote_versions.outputs.goplugify }})"
+          else
+            git commit -m "chore: update go.mod and go.sum"
+          fi
+          
+          git push
+
+      - name: Create Release
+        if: steps.version_check.outputs.update_needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version_check.outputs.new_project_version }}
+          PLUGIN_CHANGED: ${{ steps.version_check.outputs.plugin_changed }}
+          GOPLUGIFY_CHANGED: ${{ steps.version_check.outputs.goplugify_changed }}
+          REM_PLUGIN: ${{ steps.remote_versions.outputs.plugin }}
+          REM_GOPLUGIFY: ${{ steps.remote_versions.outputs.goplugify }}
+        run: |
+          echo "### Upstream Updates:" > release_notes.md
+          
+          if [ "$PLUGIN_CHANGED" == "true" ]; then
+            echo "" >> release_notes.md
+            echo "#### \`${{ env.PLUGIN_REPO }}\` updated to **$REM_PLUGIN**" >> release_notes.md
+            echo "" >> release_notes.md
+            cat /tmp/plugin_notes.txt >> release_notes.md
+            echo "" >> release_notes.md
+            echo "---" >> release_notes.md
+          fi
+          
+          if [ "$GOPLUGIFY_CHANGED" == "true" ]; then
+            echo "" >> release_notes.md
+            echo "#### \`go-plugify\` updated to **$REM_GOPLUGIFY**" >> release_notes.md
+            echo "" >> release_notes.md
+            cat /tmp/goplugify_notes.txt >> release_notes.md
+            echo "" >> release_notes.md
+          fi
+          
+          gh release create "$VERSION" --notes-file release_notes.md
+
+  delete-old-actions:
+    if: ${{ inputs.cleanup_only || success() }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete old workflow runs
+        uses: yanovation/delete-old-actions@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          days-ago: ${{ inputs.days_ago || 30 }}
+          dry-run: false
