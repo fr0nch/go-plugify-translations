@@ -6,6 +6,9 @@ PLUGIFY_EXPORT String (*__translations_LoadTranslation)(Vector*) = NULL;
 PLUGIFY_EXPORT void (*__translations_ReloadTransalations)() = NULL;
 
 
+PLUGIFY_EXPORT void (*__translations_SetDefaultLanguage)(String*) = NULL;
+
+
 PLUGIFY_EXPORT bool (*__translations_HasTranslation)(String*) = NULL;
 
 

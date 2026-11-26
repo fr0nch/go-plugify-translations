@@ -4,6 +4,7 @@ package translations
 #include "translations.h"
 #cgo noescape LoadTranslation
 #cgo noescape ReloadTransalations
+#cgo noescape SetDefaultLanguage
 #cgo noescape HasTranslation
 #cgo noescape HasTranslatedForLanguage
 #cgo noescape Translate
@@ -65,6 +66,27 @@ var _ReloadTransalations = func() {
 //
 func ReloadTransalations() {
 	_ReloadTransalations()
+}
+
+var _SetDefaultLanguage = func(lang string) {
+	__lang := plugify.ConstructString(lang)
+	plugify.Block {
+		Try: func() {
+			C.SetDefaultLanguage((*C.String)(unsafe.Pointer(&__lang)))
+		},
+		Finally: func() {
+			// Perform cleanup.
+			plugify.DestroyString(&__lang)
+		},
+	}.Do()
+}
+
+// SetDefaultLanguage 
+//  @brief Sets the language used when a key has no value for the requested language.
+//
+//  @param lang: The default language code. An empty string disables the fallback.
+func SetDefaultLanguage(lang string) {
+	_SetDefaultLanguage(lang)
 }
 
 var _HasTranslation = func(key string) bool {
@@ -148,7 +170,7 @@ var _Translate = func(lang string, key string) string {
 //  @param lang: The target language code.
 //  @param key: The translation key.
 //
-//  @return The translated string, or an empty string if not found.
+//  @return The translated string. Falls back to the default language when the language has no value; the key itself if neither is found.
 func Translate(lang string, key string) string {
 	return _Translate(lang, key)
 }
@@ -184,7 +206,7 @@ var _TranslateFormat = func(lang string, key string, args []any) string {
 //  @param key: The translation key.
 //  @param args: Format arguments to substitute into the translated string.
 //
-//  @return The formatted translated string, or an empty string if not found.
+//  @return The formatted translated string. Falls back to the default language when the language has no value; the key itself if neither is found.
 func TranslateFormat(lang string, key string, args []any) string {
 	return _TranslateFormat(lang, key, args)
 }

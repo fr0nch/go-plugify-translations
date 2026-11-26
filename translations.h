@@ -14,6 +14,12 @@ static void ReloadTransalations() {
 	__translations_ReloadTransalations();
 }
 
+extern void (*__translations_SetDefaultLanguage)(String*);
+
+static void SetDefaultLanguage(String* lang) {
+	__translations_SetDefaultLanguage(lang);
+}
+
 extern bool (*__translations_HasTranslation)(String*);
 
 static bool HasTranslation(String* key) {
